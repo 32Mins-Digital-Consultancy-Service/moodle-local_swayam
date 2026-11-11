@@ -230,3 +230,51 @@ Expected: HTTP 204
 ---
 
 *local_swayam v1.0.0 — 32Mins LMS Team — June 2026*
+
+---
+
+## Upgrading to v1.0.3 (from v1.0.2)
+
+### What changed
+- **Fix: completion never reached Swayam Plus (portal stuck at e.g. 98%).**
+  At 100% v1.0.2 called `completion_info::mark_course_completions()`, which
+  does not exist in Moodle. The observer crashed, so `/completion` was never
+  sent. v1.0.3 sends `/completion` directly at 100%.
+- Progress now uses Moodle core's own calculation
+  (`\core_completion\progress::get_course_progress_percentage`), so the
+  percentage pushed matches the progress bar students see in Moodle.
+- `floor()` instead of `round()` — 100% is only reported when truly complete.
+- The 6-hourly scheduled task now **retries completions** that failed or were
+  missed (v1.0.2 skipped every learner at 100%).
+- Completion is sent once per enrollment (new `completionsent` flag), even if
+  several triggers fire.
+- Observer errors are caught and logged (`OBSERVER_EXCEPTION`) instead of
+  breaking the student's page.
+- New CLI: `cli/resend_completion.php` to find and fix stuck learners.
+- The plugin no longer writes to Moodle course completion data at all.
+
+### Database change (additive only)
+Three columns are added to `mdl_local_swayam_enrolmap`, all with default 0:
+`completionsent`, `timecompletionsent`, `completionattempts`.
+No table, column or row is dropped or modified. Moodle core tables are not touched.
+
+### Upgrade steps
+1. Ask the DB team for a backup of the Moodle database
+   (at minimum `mdl_local_swayam_enrolmap`) before upgrading.
+2. Test on staging first if available.
+3. Replace the `local/swayam` folder with the new one
+   (or Site admin → Plugins → Install plugins → upload ZIP).
+   **Do NOT uninstall the old plugin first** — uninstall drops the enrolmap table.
+4. Visit Site admin → Notifications and run the upgrade.
+5. Check stuck learners (dry run), then send:
+   ```
+   php local/swayam/cli/resend_completion.php
+   php local/swayam/cli/resend_completion.php --execute
+   ```
+   (Or wait for the next scheduled-task run — it does the same automatically.)
+6. Check `local/swayam/view_logs.php` for `COMPLETION_POSTED` / `COMPLETION_FAILED`.
+
+### Rollback
+Restore the v1.0.2 folder. Moodle will refuse a version downgrade, so
+rollback = restore the code **and** the DB backup from step 1. The extra
+columns are harmless if left in place.

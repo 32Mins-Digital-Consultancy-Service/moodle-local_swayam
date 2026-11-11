@@ -241,9 +241,22 @@ class observer {
     // PROGRESS CALCULATION
     // =========================================================================
 
+    /**
+     * Returns the course progress percentage (0-100) for a user, or -1 on error.
+     *
+     * v1.0.3: uses the SAME calculation Moodle core uses for its course
+     * progress bar (\core_completion\progress), so the number pushed to
+     * Swayam Plus matches what the student sees in the LMS. If Moodle already
+     * marks the course complete, the result is always 100.
+     */
     public static function calculate_progress(int $userid, int $courseid): int {
-        $course = get_course($courseid);
-        if (!$course) {
+        global $CFG;
+        require_once($CFG->libdir . '/completionlib.php');
+
+        try {
+            $course = get_course($courseid);
+        } catch (\Throwable $e) {
+            logger::error('PROGRESS_COURSE_NOT_FOUND', ['courseid' => $courseid, 'error' => $e->getMessage()]);
             return -1;
         }
 
@@ -256,6 +269,15 @@ class observer {
             return -1;
         }
 
+        // Moodle already says the course is complete -> 100%.
+        if ($completion->is_course_complete($userid)) {
+            logger::info('PROGRESS_CALCULATED', [
+                'userid' => $userid, 'courseid' => $courseid,
+                'percent' => '100%', 'source' => 'course_completions',
+            ]);
+            return 100;
+        }
+
         $modules = $completion->get_activities();
         if (empty($modules)) {
             logger::error('PROGRESS_NO_ACTIVITIES', [
@@ -265,27 +287,121 @@ class observer {
             return 0;
         }
 
-        $total = count($modules);
-        $done  = 0;
+        // Same function the Moodle dashboard / course progress bar uses.
+        $source = 'core_progress';
+        $raw    = \core_completion\progress::get_course_progress_percentage($course, $userid);
 
-        foreach ($modules as $cm) {
-            $data = $completion->get_data($cm, false, $userid);
-            if (in_array((int)$data->completionstate, [COMPLETION_COMPLETE, COMPLETION_COMPLETE_PASS], true)) {
-                $done++;
+        if ($raw === null) {
+            // Core returns null when the user is not a tracked user (e.g. no
+            // student role). Fall back to the plugin's own count.
+            $source = 'plugin_count';
+            $done   = 0;
+            foreach ($modules as $cm) {
+                $data = $completion->get_data($cm, true, $userid);
+                if (in_array((int)$data->completionstate, [COMPLETION_COMPLETE, COMPLETION_COMPLETE_PASS], true)) {
+                    $done++;
+                }
             }
+            $raw = 100 * $done / count($modules);
         }
 
-        $percent = (int) round(100 * $done / $total);
+        // floor(), not round(): never report 100% until everything is done
+        // (round() turns 199/200 = 99.5 into 100).
+        $percent = (int) floor((float)$raw + 1e-9);
+        $percent = max(0, min(100, $percent));
 
         logger::info('PROGRESS_CALCULATED', [
             'userid'   => $userid,
             'courseid' => $courseid,
-            'done'     => $done,
-            'total'    => $total,
+            'total'    => count($modules),
+            'raw'      => round((float)$raw, 2),
             'percent'  => $percent . '%',
+            'source'   => $source,
         ]);
 
         return $percent;
+    }
+
+    // =========================================================================
+    // COMPLETION SENDER  (shared by events, scheduled task and CLI)
+    // =========================================================================
+
+    /**
+     * POSTs /completion to Swayam Plus once per enrollment.
+     *
+     * Marks local_swayam_enrolmap.completionsent = 1 on HTTP 204 so it is
+     * never sent twice. On failure completionsent stays 0 and the scheduled
+     * task retries it. Does NOT write anything to Moodle completion/grade data.
+     *
+     * @return bool true if completion is (now or already) recorded on Swayam Plus
+     */
+    public static function send_completion(\stdClass $map, int $userid, int $courseid,
+                                           string $trigger, bool $force = false): bool {
+        global $DB;
+
+        // Re-read the row so two triggers firing close together see the latest flag.
+        $fresh = $DB->get_record('local_swayam_enrolmap', ['id' => $map->id]);
+        if ($fresh) {
+            $map = $fresh;
+        }
+
+        if (!$force && !empty($map->completionsent)) {
+            logger::info('COMPLETION_ALREADY_SENT', [
+                'userid' => $userid, 'enrollmentId' => $map->enrollmentid, 'trigger' => $trigger,
+            ]);
+            return true;
+        }
+
+        $token = self::token();
+        if (!$token) {
+            logger::error('COMPLETION_NO_TOKEN', ['userid' => $userid, 'trigger' => $trigger]);
+            return false;
+        }
+
+        // Include final grade in note if available.
+        $sql   = "SELECT gg.finalgrade FROM {grade_grades} gg
+                  JOIN {grade_items} gi ON gi.id = gg.itemid
+                  WHERE gi.courseid = :courseid AND gi.itemtype = 'course' AND gg.userid = :userid";
+        $grade = $DB->get_field_sql($sql, ['courseid' => $courseid, 'userid' => $userid]);
+        $grade = ($grade !== false && $grade !== null) ? round((float)$grade, 1) : null;
+
+        $note = $grade !== null
+            ? "Completed on Moodle LMS, final grade {$grade}%"
+            : 'Completed on Moodle LMS';
+
+        $path = "/api/v1/partner/enrollments/{$map->enrollmentid}/completion";
+        [$http, $response] = self::api_post($path, $token, ['note' => $note]);
+
+        $now    = time();
+        $update = (object)[
+            'id'                 => $map->id,
+            'timemodified'       => $now,
+            'completionattempts' => (int)($map->completionattempts ?? 0) + 1,
+        ];
+
+        if ($http === 204) {
+            $update->completionsent     = 1;
+            $update->timecompletionsent = $now;
+            logger::success('COMPLETION_POSTED', [
+                'userid'       => $userid,
+                'enrollmentId' => $map->enrollmentid,
+                'note'         => $note,
+                'trigger'      => $trigger,
+                'result'       => 'Certificate triggered on Swayam Plus',
+            ]);
+        } else {
+            logger::error('COMPLETION_FAILED', [
+                'userid'       => $userid,
+                'enrollmentId' => $map->enrollmentid,
+                'http'         => $http,
+                'response'     => $response,
+                'trigger'      => $trigger,
+                'next'         => 'Will be retried by the scheduled task',
+            ]);
+        }
+
+        $DB->update_record('local_swayam_enrolmap', $update);
+        return $http === 204;
     }
 
     // =========================================================================
@@ -293,6 +409,18 @@ class observer {
     // =========================================================================
 
     public static function user_loggedin(\core\event\user_loggedin $event): void {
+        try {
+            self::handle_user_loggedin($event);
+        } catch (\Throwable $e) {
+            logger::error('OBSERVER_EXCEPTION', [
+                'handler' => 'user_loggedin',
+                'error'   => $e->getMessage(),
+                'where'   => $e->getFile() . ':' . $e->getLine(),
+            ]);
+        }
+    }
+
+    private static function handle_user_loggedin(\core\event\user_loggedin $event): void {
         $userid = (int)$event->objectid;
         logger::info('LOGIN_EVENT', ['userid' => $userid]);
         self::sync_enrollments_for_user($userid);
@@ -406,6 +534,18 @@ class observer {
     // =========================================================================
 
     public static function module_completed(\core\event\course_module_completion_updated $event): void {
+        try {
+            self::handle_module_completed($event);
+        } catch (\Throwable $e) {
+            logger::error('OBSERVER_EXCEPTION', [
+                'handler' => 'module_completed',
+                'error'   => $e->getMessage(),
+                'where'   => $e->getFile() . ':' . $e->getLine(),
+            ]);
+        }
+    }
+
+    private static function handle_module_completed(\core\event\course_module_completion_updated $event): void {
         global $DB;
 
         $completionstate = (int)($event->other['completionstate'] ?? 0);
@@ -459,22 +599,17 @@ class observer {
             return;
         }
 
-        $token = self::token();
-        if (!$token) {
-            logger::error('MODULE_NO_TOKEN', ['userid' => $userid]);
+        // At 100% -> POST /completion directly.
+        // (v1.0.2 called completion_info::mark_course_completions(), which does
+        //  not exist in Moodle, so the observer crashed and nothing was sent.)
+        if ($percent >= 100) {
+            self::send_completion($map, $userid, $courseid, 'module_completed');
             return;
         }
 
-        // At 100% — force Moodle course completion so course_completed event fires → /completion POST.
-        if ($percent >= 100) {
-            $course      = get_course($courseid);
-            $completion  = new \completion_info($course);
-            $ccompletion = $DB->get_record('course_completions', ['userid' => $userid, 'course' => $courseid]);
-
-            if (!$ccompletion || is_null($ccompletion->timecompleted)) {
-                $completion->mark_course_completions([$userid]);
-                logger::info('MODULE_FORCED_COURSE_COMPLETE', ['userid' => $userid, 'courseid' => $courseid]);
-            }
+        $token = self::token();
+        if (!$token) {
+            logger::error('MODULE_NO_TOKEN', ['userid' => $userid]);
             return;
         }
 
@@ -507,6 +642,18 @@ class observer {
     // =========================================================================
 
     public static function course_completed(\core\event\course_completed $event): void {
+        try {
+            self::handle_course_completed($event);
+        } catch (\Throwable $e) {
+            logger::error('OBSERVER_EXCEPTION', [
+                'handler' => 'course_completed',
+                'error'   => $e->getMessage(),
+                'where'   => $e->getFile() . ':' . $e->getLine(),
+            ]);
+        }
+    }
+
+    private static function handle_course_completed(\core\event\course_completed $event): void {
         global $DB;
 
         $userid   = (int)$event->relateduserid;
@@ -520,42 +667,6 @@ class observer {
             return;
         }
 
-        $token = self::token();
-        if (!$token) {
-            logger::error('COMPLETION_NO_TOKEN', ['userid' => $userid]);
-            return;
-        }
-
-        // Include final grade in note if available.
-        $sql   = "SELECT gg.finalgrade FROM {grade_grades} gg
-                  JOIN {grade_items} gi ON gi.id = gg.itemid
-                  WHERE gi.courseid = :courseid AND gi.itemtype = 'course' AND gg.userid = :userid";
-        $grade = $DB->get_field_sql($sql, ['courseid' => $courseid, 'userid' => $userid]);
-        $grade = ($grade !== false && $grade !== null) ? round((float)$grade, 1) : null;
-
-        $note = $grade !== null
-            ? "Completed on Moodle LMS, final grade {$grade}%"
-            : 'Completed on Moodle LMS';
-
-        $path = "/api/v1/partner/enrollments/{$map->enrollmentid}/completion";
-        [$http, $response] = self::api_post($path, $token, ['note' => $note]);
-
-        if ($http === 204) {
-            logger::success('COMPLETION_POSTED', [
-                'userid'       => $userid,
-                'enrollmentId' => $map->enrollmentid,
-                'note'         => $note,
-                'result'       => 'Certificate triggered on Swayam Plus',
-            ]);
-        } else {
-            logger::error('COMPLETION_FAILED', [
-                'userid'       => $userid,
-                'enrollmentId' => $map->enrollmentid,
-                'http'         => $http,
-                'response'     => $response,
-            ]);
-        }
-
-        $DB->update_record('local_swayam_enrolmap', (object)['id' => $map->id, 'timemodified' => time()]);
+        self::send_completion($map, $userid, $courseid, 'course_completed');
     }
 }

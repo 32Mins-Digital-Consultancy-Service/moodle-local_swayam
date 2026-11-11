@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<XMLDB PATH="local/swayam/db" VERSION="20260625" COMMENT="Swayam Plus enrolment mapping"
+<XMLDB PATH="local/swayam/db" VERSION="20261110" COMMENT="Swayam Plus enrolment mapping"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
   <TABLES>
@@ -13,6 +13,9 @@
         <FIELD NAME="status"       TYPE="char" LENGTH="30" NOTNULL="true" DEFAULT="ACCESS_PROVISIONED" COMMENT="Swayam Plus enrollment status"/>
         <FIELD NAME="timecreated"  TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0"/>
         <FIELD NAME="timemodified" TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="completionsent"     TYPE="int" LENGTH="1"  NOTNULL="true" DEFAULT="0" COMMENT="1 = /completion accepted by Swayam Plus (HTTP 204)"/>
+        <FIELD NAME="timecompletionsent" TYPE="int" LENGTH="10" NOTNULL="true" DEFAULT="0" COMMENT="When /completion was accepted"/>
+        <FIELD NAME="completionattempts" TYPE="int" LENGTH="5"  NOTNULL="true" DEFAULT="0" COMMENT="Number of /completion attempts"/>
       </FIELDS>
       <KEYS>
         <KEY NAME="primary" TYPE="primary" FIELDS="id"/>

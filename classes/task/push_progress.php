@@ -3,15 +3,20 @@ namespace local_swayam\task;
 defined('MOODLE_INTERNAL') || die();
 
 /**
- * Scheduled task: safety-net progress sync every 6 hours.
+ * Scheduled task: safety-net sync every 6 hours.
  *
- * The primary progress push is event-driven (module_completed observer).
- * This task catches any missed events — network failures, bulk imports, etc.
+ * - Progress below 100%  -> POST /progress (catches missed events).
+ * - Progress at 100% and completion not yet confirmed -> POST /completion
+ *   (v1.0.3: retries completions; v1.0.2 skipped these, so a failed or
+ *    missed completion was never re-sent and the portal stayed at e.g. 98%).
  */
 class push_progress extends \core\task\scheduled_task {
 
+    /** Stop retrying a completion after this many failed attempts (≈ 7.5 days at 6h). */
+    const MAX_COMPLETION_ATTEMPTS = 30;
+
     public function get_name(): string {
-        return 'Swayam Plus — Safety-net progress sync';
+        return 'Swayam Plus — Safety-net progress and completion sync';
     }
 
     public function execute(): void {
@@ -33,22 +38,30 @@ class push_progress extends \core\task\scheduled_task {
 
         mtrace('local_swayam push_progress: checking ' . count($maps) . ' enrollment(s)...');
 
-        $pushed  = 0;
-        $skipped = 0;
-        $errors  = 0;
+        $pushed = 0; $completed = 0; $skipped = 0; $errors = 0;
 
         foreach ($maps as $map) {
             $userid   = (int)$map->userid;
             $courseid = (int)$map->courseid;
 
-            // Only push if IN_PROGRESS.
+            if (!empty($map->completionsent)) {
+                $skipped++;   // Already completed on Swayam Plus — nothing more to send.
+                continue;
+            }
+
             if ($map->status !== 'IN_PROGRESS') {
                 mtrace("  [SKIP] userid={$userid} courseid={$courseid} — status={$map->status} (not IN_PROGRESS)");
                 $skipped++;
                 continue;
             }
 
-            $percent = \local_swayam\observer::calculate_progress($userid, $courseid);
+            try {
+                $percent = \local_swayam\observer::calculate_progress($userid, $courseid);
+            } catch (\Throwable $e) {
+                mtrace("  [ERR] userid={$userid} courseid={$courseid} — " . $e->getMessage());
+                $errors++;
+                continue;
+            }
 
             if ($percent < 0) {
                 $skipped++;
@@ -56,8 +69,20 @@ class push_progress extends \core\task\scheduled_task {
             }
 
             if ($percent >= 100) {
-                mtrace("  [SKIP] userid={$userid} courseid={$courseid} — 100%, handled by completion event");
-                $skipped++;
+                if ((int)($map->completionattempts ?? 0) >= self::MAX_COMPLETION_ATTEMPTS) {
+                    mtrace("  [SKIP] userid={$userid} courseid={$courseid} — completion failed "
+                        . self::MAX_COMPLETION_ATTEMPTS . " times, run cli/resend_completion.php manually");
+                    $skipped++;
+                    continue;
+                }
+                $ok = \local_swayam\observer::send_completion($map, $userid, $courseid, 'scheduled_task');
+                if ($ok) {
+                    $completed++;
+                    mtrace("  [OK]  userid={$userid} courseid={$courseid} enrollmentId={$map->enrollmentid} → COMPLETION sent");
+                } else {
+                    $errors++;
+                    mtrace("  [ERR] userid={$userid} courseid={$courseid} → completion failed (see view_logs.php)");
+                }
                 continue;
             }
 
@@ -81,6 +106,6 @@ class push_progress extends \core\task\scheduled_task {
             }
         }
 
-        mtrace("local_swayam push_progress: done. pushed={$pushed} skipped={$skipped} errors={$errors}");
+        mtrace("local_swayam push_progress: done. progress={$pushed} completions={$completed} skipped={$skipped} errors={$errors}");
     }
 }

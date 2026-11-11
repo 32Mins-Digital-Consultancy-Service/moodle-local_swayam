@@ -2,7 +2,7 @@
 defined('MOODLE_INTERNAL') || die();
 
 $plugin->component = 'local_swayam';
-$plugin->version   = 2026080401;
+$plugin->version   = 2026111000;
 $plugin->requires  = 2022041900;   // Moodle 4.0+
 $plugin->maturity  = MATURITY_STABLE;
-$plugin->release   = '1.0.0';
+$plugin->release   = '1.0.3';
