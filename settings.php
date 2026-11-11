@@ -46,4 +46,29 @@ if ($hassiteconfig) {
         'swayamsub',
         PARAM_ALPHANUMEXT
     ));
+
+    // ---- Webhook (Swayam Plus -> Moodle) ------------------------------------
+    $settings->add(new admin_setting_heading(
+        'local_swayam/webhookheading',
+        get_string('webhookheading', 'local_swayam'),
+        get_string('webhookheading_desc', 'local_swayam', $CFG->wwwroot . '/local/swayam/webhook.php')
+    ));
+
+    $settings->add(new admin_setting_configpasswordunmask(
+        'local_swayam/webhooksecret',
+        get_string('webhooksecret', 'local_swayam'),
+        get_string('webhooksecret_desc', 'local_swayam'),
+        ''
+    ));
+
+    $settings->add(new admin_setting_configselect(
+        'local_swayam/revokeaction',
+        get_string('revokeaction', 'local_swayam'),
+        get_string('revokeaction_desc', 'local_swayam'),
+        'suspend',
+        [
+            'suspend' => get_string('revokeaction_suspend', 'local_swayam'),
+            'unenrol' => get_string('revokeaction_unenrol', 'local_swayam'),
+        ]
+    ));
 }

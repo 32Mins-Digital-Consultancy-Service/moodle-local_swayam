@@ -22,6 +22,12 @@ class push_progress extends \core\task\scheduled_task {
     public function execute(): void {
         global $DB;
 
+        // Housekeeping first, so it runs even if the API is unreachable.
+        $purged = \local_swayam\webhook::purge_old_deliveries();
+        if ($purged) {
+            mtrace("local_swayam push_progress: purged {$purged} webhook delivery log row(s) older than 30 days");
+        }
+
         $token = \local_swayam\observer::get_token_for_task();
         if (!$token) {
             mtrace('local_swayam push_progress: could not mint M2M token — aborting');

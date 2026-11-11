@@ -10,6 +10,8 @@ defined('MOODLE_INTERNAL') || die();
  *  - course_module_completion_updated → push progress % to Swayam Plus
  *  - course_completed                 → push completion to Swayam Plus
  *
+ * Inbound webhooks (access granted / ended / completed): see webhook.php.
+ *
  * Swayam Plus API base: https://swayamplus.education.gov.in
  */
 class observer {
@@ -142,7 +144,7 @@ class observer {
     // SUB RESOLUTION  (profile field → oauth2_linked_login fallback)
     // =========================================================================
 
-    private static function get_swayam_sub(int $userid): ?string {
+    public static function get_swayam_sub(int $userid): ?string {
         global $DB;
 
         $shortname = get_config('local_swayam', 'subfield') ?: 'swayamsub';
@@ -186,6 +188,51 @@ class observer {
         return $sub;
     }
 
+    /**
+     * Reverse lookup: Swayam Plus sub → Moodle user id (0 if no such user yet).
+     * Checks the same two layers as get_swayam_sub(). Used by the webhook.
+     */
+    public static function find_userid_by_sub(string $sub): int {
+        global $DB;
+
+        $sub = trim($sub);
+        if ($sub === '') {
+            return 0;
+        }
+        $shortname = get_config('local_swayam', 'subfield') ?: 'swayamsub';
+
+        // Layer 1: custom profile field.
+        $sql = "SELECT u.id
+                  FROM {user} u
+                  JOIN {user_info_data} uid ON uid.userid = u.id
+                  JOIN {user_info_field} f  ON f.id = uid.fieldid
+                 WHERE f.shortname = :shortname
+                   AND " . $DB->sql_compare_text('uid.data', 40) . " = :sub
+                   AND u.deleted = 0
+              ORDER BY u.id";
+        $userid = $DB->get_field_sql($sql, ['shortname' => $shortname, 'sub' => $sub], IGNORE_MULTIPLE);
+        if ($userid) {
+            return (int)$userid;
+        }
+
+        // Layer 2: OAuth2 linked login against the Swayam Plus issuer.
+        $apibase = rtrim(get_config('local_swayam', 'apibase'), '/');
+        $sql = "SELECT u.id
+                  FROM {auth_oauth2_linked_login} lin
+                  JOIN {oauth2_issuer} iss ON iss.id = lin.issuerid
+                  JOIN {user} u            ON u.id = lin.userid
+                 WHERE lin.username = :sub
+                   AND " . $DB->sql_like('iss.baseurl', ':baseurl', false) . "
+                   AND u.deleted = 0
+              ORDER BY u.id";
+        $userid = $DB->get_field_sql($sql, [
+            'sub'     => $sub,
+            'baseurl' => $DB->sql_like_escape($apibase) . '%',
+        ], IGNORE_MULTIPLE);
+
+        return (int)$userid;
+    }
+
     public static function write_sub_to_profile(int $userid, string $sub, string $shortname = 'swayamsub'): void {
         global $DB;
 
@@ -210,7 +257,11 @@ class observer {
     // ENROL HELPER
     // =========================================================================
 
-    private static function enrol_user_into_course(int $userid, int $courseid): void {
+    /**
+     * @param bool $reactivate true = also lift a suspension (used only when the
+     *                         suspension was applied by a Swayam Plus revocation)
+     */
+    public static function enrol_user_into_course(int $userid, int $courseid, bool $reactivate = false): void {
         global $DB;
 
         $plugin = enrol_get_plugin('manual');
@@ -232,9 +283,43 @@ class observer {
         }
 
         $roleid = $DB->get_field('role', 'id', ['shortname' => 'student']);
-        $plugin->enrol_user($instance, $userid, $roleid);
+        // Status null = keep the current status of an existing enrolment.
+        $plugin->enrol_user($instance, $userid, $roleid, 0, 0, $reactivate ? ENROL_USER_ACTIVE : null);
 
         logger::success('ENROL_USER', ['userid' => $userid, 'courseid' => $courseid]);
+    }
+
+    /**
+     * Ends a learner's access after a Swayam Plus revocation (webhook).
+     * Only touches manual enrolments — the method this plugin enrols with.
+     *
+     * @param string $action 'suspend' (keeps progress and grades) or 'unenrol'
+     */
+    public static function remove_user_from_course(int $userid, int $courseid, string $action = 'suspend'): void {
+        global $DB;
+
+        $plugin = enrol_get_plugin('manual');
+        if (!$plugin) {
+            logger::error('ENROL_NO_PLUGIN', ['userid' => $userid, 'courseid' => $courseid]);
+            return;
+        }
+
+        $done = 0;
+        foreach ($DB->get_records('enrol', ['courseid' => $courseid, 'enrol' => 'manual']) as $instance) {
+            if (!$DB->record_exists('user_enrolments', ['enrolid' => $instance->id, 'userid' => $userid])) {
+                continue;
+            }
+            if ($action === 'unenrol') {
+                $plugin->unenrol_user($instance, $userid);
+            } else {
+                $plugin->update_user_enrol($instance, $userid, ENROL_USER_SUSPENDED);
+            }
+            $done++;
+        }
+
+        logger::success('ACCESS_REMOVED', [
+            'userid' => $userid, 'courseid' => $courseid, 'action' => $action, 'enrolments' => $done,
+        ]);
     }
 
     // =========================================================================
@@ -424,6 +509,13 @@ class observer {
         $userid = (int)$event->objectid;
         logger::info('LOGIN_EVENT', ['userid' => $userid]);
         self::sync_enrollments_for_user($userid);
+
+        // Entitlements that arrived by webhook before this account existed
+        // (also covers a failed Enrollments API call above).
+        $sub = self::get_swayam_sub($userid);
+        if ($sub) {
+            webhook::apply_entitlements_for_user($userid, $sub);
+        }
     }
 
     /**
@@ -494,10 +586,12 @@ class observer {
             }
 
             $courseid = (int)$course->id;
-            self::enrol_user_into_course($userid, $courseid);
-
             $existing = $DB->get_record('local_swayam_enrolmap', ['userid' => $userid, 'courseid' => $courseid]);
             $now      = time();
+
+            // Access was ended by a webhook revocation and Swayam Plus now
+            // reports it active again -> lift the suspension.
+            self::enrol_user_into_course($userid, $courseid, $existing && $existing->status === 'TERMINATED');
 
             if ($existing) {
                 $DB->update_record('local_swayam_enrolmap', (object)[

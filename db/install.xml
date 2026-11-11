@@ -26,5 +26,45 @@
         <INDEX NAME="enrollmentid"    UNIQUE="true"  FIELDS="enrollmentid"/>
       </INDEXES>
     </TABLE>
+    <TABLE NAME="local_swayam_entitle" COMMENT="Swayam Plus enrollments received by webhook: entitlement + last applied sequence">
+      <FIELDS>
+        <FIELD NAME="id"              TYPE="int"  LENGTH="10"  NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="enrollmentid"    TYPE="char" LENGTH="36"  NOTNULL="true" COMMENT="Swayam Plus enrollment UUID"/>
+        <FIELD NAME="swayamsub"       TYPE="char" LENGTH="36"  NOTNULL="true" COMMENT="Swayam Plus learner ID (OIDC sub)"/>
+        <FIELD NAME="partnercourseid" TYPE="char" LENGTH="100" NOTNULL="true" COMMENT="Matches mdl_course.idnumber"/>
+        <FIELD NAME="status"          TYPE="char" LENGTH="30"  NOTNULL="true" DEFAULT="ACCESS_PROVISIONED" COMMENT="Status after the last applied event"/>
+        <FIELD NAME="reason"          TYPE="char" LENGTH="30"  NOTNULL="true" COMMENT="Revocation reason, if revoked"/>
+        <FIELD NAME="sequence"        TYPE="int"  LENGTH="10"  NOTNULL="true" DEFAULT="0" COMMENT="Highest event sequence applied"/>
+        <FIELD NAME="sandbox"         TYPE="int"  LENGTH="1"   NOTNULL="true" DEFAULT="0" COMMENT="1 = Test drive enrollment"/>
+        <FIELD NAME="timecreated"     TYPE="int"  LENGTH="10"  NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="timemodified"    TYPE="int"  LENGTH="10"  NOTNULL="true" DEFAULT="0"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="enrollmentid" UNIQUE="true"  FIELDS="enrollmentid"/>
+        <INDEX NAME="swayamsub"    UNIQUE="false" FIELDS="swayamsub"/>
+      </INDEXES>
+    </TABLE>
+    <TABLE NAME="local_swayam_webhook" COMMENT="Webhook deliveries already processed (duplicate detection, kept 30 days)">
+      <FIELDS>
+        <FIELD NAME="id"           TYPE="int"  LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="deliveryid"   TYPE="char" LENGTH="64" NOTNULL="true" COMMENT="X-Swayam-Delivery"/>
+        <FIELD NAME="eventtype"    TYPE="char" LENGTH="40" NOTNULL="true"/>
+        <FIELD NAME="enrollmentid" TYPE="char" LENGTH="36" NOTNULL="true"/>
+        <FIELD NAME="sequence"     TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="sandbox"      TYPE="int"  LENGTH="1"  NOTNULL="true" DEFAULT="0"/>
+        <FIELD NAME="outcome"      TYPE="char" LENGTH="30" NOTNULL="true" COMMENT="What the plugin did with it"/>
+        <FIELD NAME="timecreated"  TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="deliveryid"  UNIQUE="true"  FIELDS="deliveryid"/>
+        <INDEX NAME="timecreated" UNIQUE="false" FIELDS="timecreated"/>
+      </INDEXES>
+    </TABLE>
   </TABLES>
 </XMLDB>

@@ -252,10 +252,16 @@ Expected: HTTP 204
   breaking the student's page.
 - New CLI: `cli/resend_completion.php` to find and fix stuck learners.
 - The plugin no longer writes to Moodle course completion data at all.
+- **New: webhook receiver** (`webhook.php`). Swayam Plus tells Moodle when a
+  learner's access starts or ends, so refunded / expired / removed learners
+  lose access without waiting for a login. See "Webhook setup" below.
 
 ### Database change (additive only)
 Three columns are added to `mdl_local_swayam_enrolmap`, all with default 0:
 `completionsent`, `timecompletionsent`, `completionattempts`.
+Two new tables are created for the webhook:
+`mdl_local_swayam_entitle` (entitlements + last applied event sequence) and
+`mdl_local_swayam_webhook` (processed delivery IDs, purged after 30 days).
 No table, column or row is dropped or modified. Moodle core tables are not touched.
 
 ### Upgrade steps
@@ -277,4 +283,84 @@ No table, column or row is dropped or modified. Moodle core tables are not touch
 ### Rollback
 Restore the v1.0.2 folder. Moodle will refuse a version downgrade, so
 rollback = restore the code **and** the DB backup from step 1. The extra
-columns are harmless if left in place.
+columns and tables are harmless if left in place.
+
+---
+
+## Webhook setup (v1.0.3)
+
+Swayam Plus sends an HTTPS POST to Moodle when an enrollment changes.
+
+### Requirements
+- Moodle reachable on the public internet over **HTTPS, at a host name** (not an IP).
+- The server clock must be correct (NTP) — signatures older than 5 minutes are rejected.
+- No redirect on the receiver URL (Swayam Plus treats a 3xx as a failure).
+
+### Steps
+1. On the Swayam Plus **Integration** page → **Webhook** → **Add webhook**.
+   Receiver URL:
+   ```
+   https://your-moodle-domain/local/swayam/webhook.php
+   ```
+   Events: **Access granted**, **Access ended** (and **Completed** if wanted).
+2. Copy the signing secret (`whsec_...`) — it is shown **once**.
+3. In Moodle: Site Admin → Plugins → Local plugins → Swayam Plus Integration
+   - **Webhook signing secret** → paste the secret
+   - **When access is revoked** → *Suspend* (default, keeps progress and grades) or *Unenrol*
+4. Back on Swayam Plus select **Verify receiver**. All four checks should pass
+   and the webhook shows *Receiver verified*.
+5. Check `local/swayam/view_logs.php` for `WEBHOOK_PING` / `WEBHOOK_EVENT`.
+
+### What each event does
+
+| Event | Plugin action |
+|---|---|
+| `ping` | Answers 200, nothing else |
+| `enrollment.activated` | Stores an entitlement. Learner already has a Moodle account → enrolled immediately. No account yet → enrolled at first Swayam Plus sign-in |
+| `enrollment.revoked` | Enrolment suspended (or unenrolled), mapping set to `TERMINATED`, progress pushes stop. Lifted automatically if access is granted again |
+| `enrollment.completed` | Mapping set to `COMPLETED`; the plugin stops sending `/completion`. Moodle completion data is not written |
+
+- Duplicate deliveries are detected by delivery ID and answered 200.
+- Out-of-order events are ignored using the `sequence` number per enrollment.
+- Events for enrollments Moodle does not know are answered 200 with no action.
+- **`account_erased`**: access is removed and `WEBHOOK_ACCOUNT_ERASED_ACTION_REQUIRED`
+  is logged. The plugin never deletes a Moodle user — an admin must delete the
+  learner's personal data (Site Admin → Users → Privacy → Data requests).
+- A learner suspended manually by an admin is **not** re-activated by the plugin;
+  only suspensions caused by a revocation are lifted.
+
+### HTTP responses
+
+| Code | Meaning |
+|---|---|
+| 200 | Applied, duplicate, out of order, ping, or unknown enrollment |
+| 400 | Body is not a usable JSON event |
+| 401 | Signature missing / wrong / older than 5 minutes, or signing secret not set |
+| 500 | Processing failed — Swayam Plus retries |
+
+### Getting a new secret
+Select **Get a new secret** on Swayam Plus, then paste it into the plugin
+setting. For 24 hours requests are signed with both secrets, so there is no
+downtime while you switch.
+
+### Send a signed test request yourself (bash)
+```bash
+SECRET='whsec_...'; BODY='{"id":"manual-test-1","type":"ping","sequence":0,"data":{}}'; T=$(date +%s)
+SIG=$(printf '%s.%s' "$T" "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | sed 's/^.* //')
+curl -i -X POST https://your-moodle-domain/local/swayam/webhook.php \
+  -H 'Content-Type: application/json' \
+  -H "X-Swayam-Event: ping" -H "X-Swayam-Delivery: manual-test-1" \
+  -H "X-Swayam-Signature: t=$T,v1=$SIG" --data-raw "$BODY"
+```
+Expected: `HTTP 200` and `{"status":"ping"}`. Change one character of `SIG` → `HTTP 401`.
+
+### Webhook troubleshooting
+
+| Log entry | Fix |
+|---|---|
+| `WEBHOOK_NOT_CONFIGURED` | Set the Webhook signing secret in the plugin settings |
+| `WEBHOOK_SIGNATURE_INVALID` | Secret does not match Swayam Plus, or the server clock is off |
+| `WEBHOOK_COURSE_NOT_FOUND` | Set the Moodle Course ID number to the `partnerCourseId` |
+| `WEBHOOK_ENTITLEMENT_STORED` | Normal — learner has not signed in yet |
+| `WEBHOOK_EXCEPTION` | Processing failed; Swayam Plus retries. Check the `error` field |
+| Nothing logged at all | Request never reached Moodle — check firewall / WAF / HTTPS / redirects |
