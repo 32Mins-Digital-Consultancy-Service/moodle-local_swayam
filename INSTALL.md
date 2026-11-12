@@ -259,6 +259,8 @@ Expected: HTTP 204
 ### Database change (additive only)
 Three columns are added to `mdl_local_swayam_enrolmap`, all with default 0:
 `completionsent`, `timecompletionsent`, `completionattempts`.
+The `status` column is also added if it is missing (sites first installed
+before v1.0.2 never received it).
 Two new tables are created for the webhook:
 `mdl_local_swayam_entitle` (entitlements + last applied event sequence) and
 `mdl_local_swayam_webhook` (processed delivery IDs, purged after 30 days).

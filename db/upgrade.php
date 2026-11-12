@@ -14,6 +14,10 @@ function xmldb_local_swayam_upgrade($oldversion) {
         $table = new xmldb_table('local_swayam_enrolmap');
 
         $fields = [
+            // Sites first installed before v1.0.2 have no status column
+            // (v1.0.2 added it to install.xml without an upgrade step).
+            new xmldb_field('status', XMLDB_TYPE_CHAR, '30', null,
+                XMLDB_NOTNULL, null, 'ACCESS_PROVISIONED', 'swayamsub'),
             new xmldb_field('completionsent', XMLDB_TYPE_INTEGER, '1', null,
                 XMLDB_NOTNULL, null, '0', 'timemodified'),
             new xmldb_field('timecompletionsent', XMLDB_TYPE_INTEGER, '10', null,
