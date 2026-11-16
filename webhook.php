@@ -82,7 +82,7 @@ try {
     logger::error('WEBHOOK_EXCEPTION', [
         'delivery' => $deliveryid,
         'type'     => (string)($event['type'] ?? ''),
-        'error'    => $e->getMessage(),
+        'error'    => logger::describe($e),
         'where'    => $e->getFile() . ':' . $e->getLine(),
         'next'     => 'Swayam Plus will retry this delivery',
     ]);

@@ -499,7 +499,7 @@ class observer {
         } catch (\Throwable $e) {
             logger::error('OBSERVER_EXCEPTION', [
                 'handler' => 'user_loggedin',
-                'error'   => $e->getMessage(),
+                'error'   => logger::describe($e),
                 'where'   => $e->getFile() . ':' . $e->getLine(),
             ]);
         }
@@ -561,66 +561,144 @@ class observer {
         logger::info('LOGIN_ENROLLMENTS_FOUND', ['userid' => $userid, 'count' => count($enrollments)]);
 
         foreach ($enrollments as $enrollment) {
-
-            $status            = $enrollment['status']               ?? '';
-            $partner_course_id = trim($enrollment['partnerCourseId'] ?? '');
-            $enrollment_id     = trim($enrollment['enrollmentId']    ?? '');
-
-            if (!in_array($status, ['ACCESS_PROVISIONED', 'IN_PROGRESS'], true)) {
-                logger::info('LOGIN_SKIP_ENROLLMENT', ['enrollmentId' => $enrollment_id, 'status' => $status]);
-                continue;
-            }
-
-            if ($partner_course_id === '' || $enrollment_id === '') {
-                logger::error('LOGIN_MISSING_IDS', ['enrollment' => json_encode($enrollment)]);
-                continue;
-            }
-
-            $course = $DB->get_record('course', ['idnumber' => $partner_course_id]);
-            if (!$course) {
-                logger::error('LOGIN_COURSE_NOT_FOUND', [
-                    'partnerCourseId' => $partner_course_id,
-                    'fix'             => "Set Course ID number = '{$partner_course_id}' in Moodle course Edit Settings",
-                ]);
-                continue;
-            }
-
-            $courseid = (int)$course->id;
-            $existing = $DB->get_record('local_swayam_enrolmap', ['userid' => $userid, 'courseid' => $courseid]);
-            $now      = time();
-
-            // Access was ended by a webhook revocation and Swayam Plus now
-            // reports it active again -> lift the suspension.
-            self::enrol_user_into_course($userid, $courseid, $existing && $existing->status === 'TERMINATED');
-
-            if ($existing) {
-                $DB->update_record('local_swayam_enrolmap', (object)[
-                    'id'           => $existing->id,
-                    'enrollmentid' => $enrollment_id,
-                    'swayamsub'    => $sub,
-                    'status'       => $status,
-                    'timemodified' => $now,
-                ]);
-            } else {
-                $DB->insert_record('local_swayam_enrolmap', (object)[
+            // One enrollment that cannot be saved must not block the others.
+            try {
+                self::sync_one_enrollment($userid, $sub, (array)$enrollment);
+            } catch (\Throwable $e) {
+                logger::error('LOGIN_ENROLLMENT_FAILED', [
                     'userid'       => $userid,
-                    'courseid'     => $courseid,
-                    'enrollmentid' => $enrollment_id,
-                    'swayamsub'    => $sub,
-                    'status'       => $status,
-                    'timecreated'  => $now,
-                    'timemodified' => $now,
+                    'enrollmentId' => (string)($enrollment['enrollmentId'] ?? ''),
+                    'course'       => (string)($enrollment['partnerCourseId'] ?? ''),
+                    'error'        => logger::describe($e),
+                    'where'        => $e->getFile() . ':' . $e->getLine(),
                 ]);
             }
+        }
+    }
 
-            logger::success('LOGIN_ENROLLED', [
+    /**
+     * Enrols the user for one enrollment returned by the Enrollments API and
+     * saves the mapping row.
+     */
+    private static function sync_one_enrollment(int $userid, string $sub, array $enrollment): void {
+        global $DB;
+
+        $status            = $enrollment['status']               ?? '';
+        $partner_course_id = trim($enrollment['partnerCourseId'] ?? '');
+        $enrollment_id     = trim($enrollment['enrollmentId']    ?? '');
+
+        if (!in_array($status, ['ACCESS_PROVISIONED', 'IN_PROGRESS'], true)) {
+            logger::info('LOGIN_SKIP_ENROLLMENT', ['enrollmentId' => $enrollment_id, 'status' => $status]);
+            return;
+        }
+
+        if ($partner_course_id === '' || $enrollment_id === '') {
+            logger::error('LOGIN_MISSING_IDS', ['enrollment' => json_encode($enrollment)]);
+            return;
+        }
+
+        $course = $DB->get_record('course', ['idnumber' => $partner_course_id]);
+        if (!$course) {
+            logger::error('LOGIN_COURSE_NOT_FOUND', [
+                'partnerCourseId' => $partner_course_id,
+                'fix'             => "Set Course ID number = '{$partner_course_id}' in Moodle course Edit Settings",
+            ]);
+            return;
+        }
+
+        $courseid = (int)$course->id;
+        $existing = $DB->get_record('local_swayam_enrolmap', ['userid' => $userid, 'courseid' => $courseid]);
+        $now      = time();
+
+        // Access was ended by a webhook revocation and Swayam Plus now
+        // reports it active again -> lift the suspension.
+        self::enrol_user_into_course($userid, $courseid, $existing && $existing->status === 'TERMINATED');
+
+        if (!self::save_map($userid, $courseid, $enrollment_id, $sub, $status, $existing ?: null)) {
+            return;
+        }
+
+        logger::success('LOGIN_ENROLLED', [
+            'userid'       => $userid,
+            'courseid'     => $courseid,
+            'enrollmentId' => $enrollment_id,
+            'status'       => $status,
+            'course'       => $course->fullname,
+        ]);
+    }
+
+    /**
+     * Inserts or updates the mapping row for one enrollment.
+     *
+     * local_swayam_enrolmap has two unique indexes: (userid, courseid) and
+     * (enrollmentid). The row is looked up both ways so neither is violated
+     * when the same Swayam Plus enrollment is already mapped to another
+     * Moodle user or course (duplicate account, or the Course ID number was
+     * moved to a different course).
+     *
+     * @return bool false when the mapping could not be saved (logged)
+     */
+    private static function save_map(int $userid, int $courseid, string $enrollmentid, string $sub,
+            string $status, ?\stdClass $bypair): bool {
+        global $DB;
+
+        $now     = time();
+        $byenrol = $DB->get_record('local_swayam_enrolmap', ['enrollmentid' => $enrollmentid]);
+
+        if ($byenrol && $bypair && (int)$byenrol->id !== (int)$bypair->id) {
+            // Two different rows claim this user+course and this enrollment.
+            // Nothing is overwritten or deleted automatically.
+            logger::error('MAP_CONFLICT', [
                 'userid'       => $userid,
                 'courseid'     => $courseid,
-                'enrollmentId' => $enrollment_id,
-                'status'       => $status,
-                'course'       => $course->fullname,
+                'enrollmentId' => $enrollmentid,
+                'row_for_user_course' => $bypair->id . ' (enrollmentId ' . $bypair->enrollmentid . ')',
+                'row_for_enrollment'  => $byenrol->id . ' (userid ' . $byenrol->userid . ', courseid ' . $byenrol->courseid . ')',
+                'fix'          => 'Two mapping rows overlap. Remove the stale row in mdl_local_swayam_enrolmap.',
             ]);
+            return false;
         }
+
+        if ($byenrol && !$bypair) {
+            // This enrollment is mapped to another Moodle user or course.
+            // Swayam Plus says it belongs to this learner + course: move it.
+            logger::info('MAP_MOVED', [
+                'enrollmentId' => $enrollmentid,
+                'from'         => 'userid ' . $byenrol->userid . ', courseid ' . $byenrol->courseid,
+                'to'           => 'userid ' . $userid . ', courseid ' . $courseid,
+            ]);
+            $DB->update_record('local_swayam_enrolmap', (object)[
+                'id'           => $byenrol->id,
+                'userid'       => $userid,
+                'courseid'     => $courseid,
+                'swayamsub'    => $sub,
+                'status'       => $status,
+                'timemodified' => $now,
+            ]);
+            return true;
+        }
+
+        if ($bypair) {
+            $DB->update_record('local_swayam_enrolmap', (object)[
+                'id'           => $bypair->id,
+                'enrollmentid' => $enrollmentid,
+                'swayamsub'    => $sub,
+                'status'       => $status,
+                'timemodified' => $now,
+            ]);
+            return true;
+        }
+
+        $DB->insert_record('local_swayam_enrolmap', (object)[
+            'userid'       => $userid,
+            'courseid'     => $courseid,
+            'enrollmentid' => $enrollmentid,
+            'swayamsub'    => $sub,
+            'status'       => $status,
+            'timecreated'  => $now,
+            'timemodified' => $now,
+        ]);
+        return true;
     }
 
     // =========================================================================
@@ -633,7 +711,7 @@ class observer {
         } catch (\Throwable $e) {
             logger::error('OBSERVER_EXCEPTION', [
                 'handler' => 'module_completed',
-                'error'   => $e->getMessage(),
+                'error'   => logger::describe($e),
                 'where'   => $e->getFile() . ':' . $e->getLine(),
             ]);
         }
@@ -741,7 +819,7 @@ class observer {
         } catch (\Throwable $e) {
             logger::error('OBSERVER_EXCEPTION', [
                 'handler' => 'course_completed',
-                'error'   => $e->getMessage(),
+                'error'   => logger::describe($e),
                 'where'   => $e->getFile() . ':' . $e->getLine(),
             ]);
         }

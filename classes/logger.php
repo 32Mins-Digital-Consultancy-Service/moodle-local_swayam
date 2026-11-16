@@ -23,6 +23,19 @@ class logger {
         file_put_contents(self::get_log_path(), $line . PHP_EOL, FILE_APPEND | LOCK_EX);
     }
 
+    /**
+     * Exception message for the log. Moodle hides the cause of a database
+     * failure behind "Error writing to database"; the driver's own message
+     * (duplicate key, unknown column, ...) is what an admin needs.
+     */
+    public static function describe(\Throwable $e): string {
+        $msg = $e->getMessage();
+        if ($e instanceof \dml_exception && !empty($e->error)) {
+            $msg .= ' [' . \core_text::substr((string)$e->error, 0, 300) . ']';
+        }
+        return $msg;
+    }
+
     public static function info(string $event, array $data = []): void {
         self::log('INFO', $event, $data);
     }
