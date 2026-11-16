@@ -10,7 +10,11 @@ function xmldb_local_swayam_upgrade($oldversion) {
     global $DB;
     $dbman = $DB->get_manager();
 
-    if ($oldversion < 2026111000) {
+    // Build 2026111001 repeats every step of 2026111000. Sites that had an
+    // earlier v1.0.3 build (2026111000, before the webhook was added) never
+    // ran the webhook steps. Every step checks before it adds, so re-running
+    // on a fully upgraded site changes nothing.
+    if ($oldversion < 2026111001) {
         $table = new xmldb_table('local_swayam_enrolmap');
 
         $fields = [
@@ -70,7 +74,7 @@ function xmldb_local_swayam_upgrade($oldversion) {
             $table->add_index('timecreated', XMLDB_INDEX_NOTUNIQUE, ['timecreated']);
             $dbman->create_table($table);
         }
-        upgrade_plugin_savepoint(true, 2026111000, 'local', 'swayam');
+        upgrade_plugin_savepoint(true, 2026111001, 'local', 'swayam');
     }
 
     return true;
