@@ -1,52 +1,114 @@
 <?php
-// local/swayam/launch.php — Swayam Plus login-initiation endpoint.
-// Entry point for the "Continue on IITM Pravartak" button on
-// swayamplus.education.gov.in. Skips Moodle's login picker: if the
-// visitor already has a live Moodle session, forward straight to the
-// course; otherwise hand off to the Swayam Plus OAuth2 issuer.
+// This file is part of Moodle - https://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
+
+/**
+ * Swayam Plus login-initiation endpoint ("Continue" button on Swayam Plus).
+ *
+ * Signed-in visitor: the enrolment sync runs now (so the course is open on
+ * arrival) and the visitor is sent to the target course.
+ *
+ * Anonymous visitor: sent to the Swayam Plus OAuth 2 service, coming back
+ * here after sign-in. auth/oauth2/login.php requires a sesskey, which this
+ * page passes. To stop other sites from starting a sign-in for a visitor
+ * (login CSRF), the automatic redirect is used only when the request comes
+ * from the Swayam Plus host (HTTP Referer). Any other request gets a page
+ * with a button, so the visitor starts the sign-in themselves.
+ *
+ * @package    local_swayam
+ * @copyright  2026 32Mins Digital Consultancy Service
+ * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+
 require_once(__DIR__ . '/../../config.php');
 
-$iss    = optional_param('iss', '', PARAM_URL);
-$target = optional_param('target_link_uri', $CFG->wwwroot . '/my/', PARAM_URL);
+use local_swayam\logger;
+use local_swayam\observer;
 
-// Expected issuer is derived from the plugin's own apibase setting
-// rather than hardcoded, so it stays in sync with settings.php.
-$expectediss = rtrim(get_config('local_swayam', 'apibase'), '/') . '/oidc';
-if ($iss !== $expectediss) {
-    \local_swayam\logger::error('LAUNCH_REJECTED', [
+$iss    = optional_param('iss', '', PARAM_URL);
+$target = optional_param('target_link_uri', '', PARAM_URL);
+
+$apibase     = rtrim((string)get_config('local_swayam', 'apibase'), '/');
+$expectediss = $apibase . '/oidc';
+if ($apibase === '' || $iss !== $expectediss) {
+    logger::error('LAUNCH_REJECTED', [
         'iss'      => $iss,
         'expected' => $expectediss,
         'fix'      => 'The iss sent by Swayam Plus must equal the API base URL setting + /oidc',
     ]);
-    throw new moodle_exception('invalidrequest');   // only accept Swayam launches
+    throw new moodle_exception('invalidrequest');
 }
 
-$wantsurl = new moodle_url($target);
+$wantsurl = new moodle_url($target !== '' ? $target : '/my/');
 if ($wantsurl->get_host() !== parse_url($CFG->wwwroot, PHP_URL_HOST)) {
-    $wantsurl = new moodle_url('/my/');              // never redirect off-site
+    $wantsurl = new moodle_url('/my/');   // Never redirect off-site.
 }
+
+$PAGE->set_context(context_system::instance());
+$PAGE->set_url(new moodle_url('/local/swayam/launch.php', ['iss' => $iss, 'target_link_uri' => $wantsurl->out(false)]));
+$PAGE->set_pagelayout('login');
 
 if (isloggedin() && !isguestuser()) {
-    \local_swayam\logger::info('LAUNCH', ['userid' => $USER->id, 'state' => 'already signed in', 'target' => $wantsurl->out(false)]);
-    redirect($wantsurl);                             // already signed in → course
+    if (observer::has_swayam_login((int)$USER->id)) {
+        // Learner-initiated page: enrol now so the course is open on arrival.
+        try {
+            observer::sync_user((int)$USER->id);
+        } catch (\Throwable $e) {
+            logger::error('LAUNCH_SYNC_FAILED', ['userid' => $USER->id, 'error' => logger::describe($e)]);
+        }
+    }
+    logger::info('LAUNCH', ['userid' => $USER->id, 'state' => 'signed in', 'target' => $wantsurl->out(false)]);
+    redirect($wantsurl);
 }
 
-// The Swayam Plus issuer is the one whose base URL matches the API base
-// setting (same lookup the enrolment sync uses); falls back to id 1.
-$apibase  = rtrim((string)get_config('local_swayam', 'apibase'), '/');
-$issuerid = $apibase === '' ? 0 : (int)$DB->get_field_sql(
-    "SELECT id FROM {oauth2_issuer} WHERE " . $DB->sql_like('baseurl', ':baseurl', false) . " ORDER BY id",
-    ['baseurl' => $DB->sql_like_escape($apibase) . '%'],
-    IGNORE_MULTIPLE
+$issuerids = observer::get_issuer_ids();
+if (!$issuerids) {
+    logger::error('LAUNCH_NO_ISSUER', [
+        'fix' => 'Create the Swayam Plus OAuth 2 service with a base URL that starts with the API base URL setting',
+    ]);
+    throw new moodle_exception('launchnoissuer', 'local_swayam');
+}
+
+// After sign-in the visitor comes back here, so the sync above runs first.
+$signin = new moodle_url('/auth/oauth2/login.php', [
+    'id'       => reset($issuerids),
+    'wantsurl' => $PAGE->url->out(false),
+    'sesskey'  => sesskey(),
+]);
+
+// Trusted origin: the Swayam Plus host, or a host in the same parent domain.
+$referrerhost = strtolower((string)parse_url((string)($_SERVER['HTTP_REFERER'] ?? ''), PHP_URL_HOST));
+$swayamhost   = strtolower((string)parse_url($apibase, PHP_URL_HOST));
+$parent       = substr($swayamhost, strpos($swayamhost, '.') + 1);
+$trusted      = $referrerhost !== '' && (
+    $referrerhost === $swayamhost
+    || (substr_count($parent, '.') >= 1 && substr($referrerhost, -strlen('.' . $parent)) === '.' . $parent)
 );
-if (!$issuerid) {
-    $issuerid = 1;
+
+logger::info('LAUNCH', [
+    'state'    => $trusted ? 'sending to SSO' : 'sign-in button shown',
+    'referrer' => $referrerhost,
+    'target'   => $wantsurl->out(false),
+]);
+
+if ($trusted) {
+    redirect($signin);
 }
 
-\local_swayam\logger::info('LAUNCH', ['state' => 'sending to SSO', 'issuerid' => $issuerid, 'target' => $wantsurl->out(false)]);
-
-redirect(new moodle_url('/auth/oauth2/login.php', [
-    'id'       => $issuerid,
-    'wantsurl' => $wantsurl->out(false),
-    'sesskey'  => sesskey(),                          // valid: minted in the visitor's session
-]));
+echo $OUTPUT->header();
+echo $OUTPUT->heading(get_string('launchheading', 'local_swayam'));
+echo html_writer::tag('p', get_string('launchintro', 'local_swayam'));
+echo $OUTPUT->single_button($signin, get_string('launchbutton', 'local_swayam'), 'get');
+echo $OUTPUT->footer();

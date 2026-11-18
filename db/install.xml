@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<XMLDB PATH="local/swayam/db" VERSION="20261110" COMMENT="Swayam Plus enrolment mapping"
+<XMLDB PATH="local/swayam/db" VERSION="20261118" COMMENT="Swayam Plus Integration"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:noNamespaceSchemaLocation="../../../lib/xmldb/xmldb.xsd">
   <TABLES>
@@ -64,6 +64,24 @@
       <INDEXES>
         <INDEX NAME="deliveryid"  UNIQUE="true"  FIELDS="deliveryid"/>
         <INDEX NAME="timecreated" UNIQUE="false" FIELDS="timecreated"/>
+      </INDEXES>
+    </TABLE>
+    <TABLE NAME="local_swayam_log" COMMENT="Integration log (IDs and status codes only), deleted after the retention period">
+      <FIELDS>
+        <FIELD NAME="id"          TYPE="int"  LENGTH="10" NOTNULL="true" SEQUENCE="true"/>
+        <FIELD NAME="loglevel"    TYPE="char" LENGTH="10" NOTNULL="true" COMMENT="INFO, SUCCESS or ERROR"/>
+        <FIELD NAME="event"       TYPE="char" LENGTH="64" NOTNULL="true" COMMENT="Event code"/>
+        <FIELD NAME="userid"      TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0" COMMENT="Moodle user the entry is about, 0 if none"/>
+        <FIELD NAME="data"        TYPE="text" NOTNULL="false" COMMENT="Details as JSON"/>
+        <FIELD NAME="timecreated" TYPE="int"  LENGTH="10" NOTNULL="true" DEFAULT="0"/>
+      </FIELDS>
+      <KEYS>
+        <KEY NAME="primary" TYPE="primary" FIELDS="id"/>
+      </KEYS>
+      <INDEXES>
+        <INDEX NAME="userid"      UNIQUE="false" FIELDS="userid"/>
+        <INDEX NAME="timecreated" UNIQUE="false" FIELDS="timecreated"/>
+        <INDEX NAME="loglevel"    UNIQUE="false" FIELDS="loglevel"/>
       </INDEXES>
     </TABLE>
   </TABLES>

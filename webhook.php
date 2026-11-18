@@ -1,17 +1,42 @@
 <?php
-// local/swayam/webhook.php — Swayam Plus webhook receiver.
+// This file is part of Moodle - https://moodle.org/
 //
-// Register this URL as the Receiver URL on the Swayam Plus Integration page:
-//   https://your-moodle-domain/local/swayam/webhook.php
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// Responses:
-//   200  event applied, duplicate, stale, ping or unknown enrollment
-//   400  body is not a usable JSON event
-//   401  signature missing / invalid / too old, or no signing secret configured
-//   405  not a POST
-//   413  body too large
-//   500  processing failed — Swayam Plus retries the delivery
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
 
+/**
+ * Swayam Plus webhook receiver.
+ *
+ * Register this URL as the Receiver URL on the Swayam Plus Integration page:
+ *   https://your-moodle-domain/local/swayam/webhook.php
+ *
+ * Server-to-server endpoint: no session, so no login or sesskey. Every
+ * request is authenticated by its HMAC-SHA256 signature instead.
+ *
+ * Responses:
+ *   200  event applied, duplicate, stale, ping or unknown enrollment
+ *   400  body is not a usable JSON event
+ *   401  signature missing / invalid / too old, or no signing secret configured
+ *   405  not a POST
+ *   413  body too large
+ *   500  processing failed; Swayam Plus retries the delivery
+ *
+ * @package    local_swayam
+ * @copyright  2026 32Mins Digital Consultancy Service
+ * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+
+// phpcs:disable moodle.Files.RequireLogin.Missing
 define('NO_MOODLE_COOKIES', true);   // Server-to-server: no session.
 define('NO_DEBUG_DISPLAY', true);    // Never leak debug output into the response.
 

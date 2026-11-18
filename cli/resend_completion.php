@@ -1,16 +1,33 @@
 <?php
-// local/swayam/cli/resend_completion.php
+// This file is part of Moodle - https://moodle.org/
 //
-// Finds Swayam Plus learners who are at 100% in Moodle but whose completion
-// was never accepted by Swayam Plus (the "98% on the portal" problem), and
-// sends /completion for them. Read-only on Moodle data; it only updates the
-// plugin's own completionsent / completionattempts columns.
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
 //
-// Usage:
-//   php local/swayam/cli/resend_completion.php                       (dry run, all)
-//   php local/swayam/cli/resend_completion.php --execute             (send for all)
-//   php local/swayam/cli/resend_completion.php --userid=123 --courseid=45 --execute
-//   add --force to resend even if completionsent = 1
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
+
+/**
+ * Send /completion for learners at 100% in Moodle whose completion was never
+ * accepted by Swayam Plus. Only updates the plugin's own columns.
+ *
+ * Usage:
+ *   php local/swayam/cli/resend_completion.php                       (dry run, all)
+ *   php local/swayam/cli/resend_completion.php --execute             (send for all)
+ *   php local/swayam/cli/resend_completion.php --userid=123 --courseid=45 --execute
+ *   add --force to resend even if already sent
+ *
+ * @package    local_swayam
+ * @copyright  2026 32Mins Digital Consultancy Service
+ * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
 define('CLI_SCRIPT', true);
 require(__DIR__ . '/../../../config.php');

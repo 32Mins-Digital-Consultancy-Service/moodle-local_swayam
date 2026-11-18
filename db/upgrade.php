@@ -1,11 +1,38 @@
 <?php
-// local/swayam/db/upgrade.php
+// This file is part of Moodle - https://moodle.org/
 //
-// Upgrade steps for local_swayam. ADDITIVE ONLY: new columns and new
-// tables are added. No existing table, column or row is dropped or changed.
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
+
+/**
+ * Upgrade steps for local_swayam.
+ *
+ * Additive only: new columns and tables are added; no existing table,
+ * column or row of mapping data is dropped.
+ *
+ * @package    local_swayam
+ * @copyright  2026 32Mins Digital Consultancy Service
+ * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
 
 defined('MOODLE_INTERNAL') || die();
 
+/**
+ * Upgrade steps.
+ *
+ * @param int $oldversion version the site is upgrading from
+ * @return bool
+ */
 function xmldb_local_swayam_upgrade($oldversion) {
     global $DB;
     $dbman = $DB->get_manager();
@@ -75,6 +102,34 @@ function xmldb_local_swayam_upgrade($oldversion) {
             $dbman->create_table($table);
         }
         upgrade_plugin_savepoint(true, 2026111001, 'local', 'swayam');
+    }
+
+    if ($oldversion < 2026111800) {
+        // Integration log moves from moodledata/local_swayam/swayam.log to a table.
+        $table = new xmldb_table('local_swayam_log');
+        if (!$dbman->table_exists($table)) {
+            $table->add_field('id', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, XMLDB_SEQUENCE, null);
+            $table->add_field('loglevel', XMLDB_TYPE_CHAR, '10', null, XMLDB_NOTNULL, null, null);
+            $table->add_field('event', XMLDB_TYPE_CHAR, '64', null, XMLDB_NOTNULL, null, null);
+            $table->add_field('userid', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
+            $table->add_field('data', XMLDB_TYPE_TEXT, null, null, null, null, null);
+            $table->add_field('timecreated', XMLDB_TYPE_INTEGER, '10', null, XMLDB_NOTNULL, null, '0');
+            $table->add_key('primary', XMLDB_KEY_PRIMARY, ['id']);
+            $table->add_index('userid', XMLDB_INDEX_NOTUNIQUE, ['userid']);
+            $table->add_index('timecreated', XMLDB_INDEX_NOTUNIQUE, ['timecreated']);
+            $table->add_index('loglevel', XMLDB_INDEX_NOTUNIQUE, ['loglevel']);
+            $dbman->create_table($table);
+        }
+
+        // The Swayam Plus ID profile field must not be editable by learners
+        // (and need not be visible to them): lock it and hide it.
+        $shortname = get_config('local_swayam', 'subfield') ?: 'swayamsub';
+        $field = $DB->get_record('user_info_field', ['shortname' => $shortname], 'id, locked, visible');
+        if ($field && (empty($field->locked) || (int)$field->visible !== 0)) {
+            $DB->update_record('user_info_field', (object)['id' => $field->id, 'locked' => 1, 'visible' => 0]);
+        }
+
+        upgrade_plugin_savepoint(true, 2026111800, 'local', 'swayam');
     }
 
     return true;

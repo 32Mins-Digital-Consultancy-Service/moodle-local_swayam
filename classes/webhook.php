@@ -1,21 +1,43 @@
 <?php
-namespace local_swayam;
-defined('MOODLE_INTERNAL') || die();
+// This file is part of Moodle - https://moodle.org/
+//
+// Moodle is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// Moodle is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with Moodle.  If not, see <https://www.gnu.org/licenses/>.
 
 /**
  * Swayam Plus webhook receiver logic (endpoint: local/swayam/webhook.php).
  *
  * Handles:
- *  - ping                  → acknowledged, no action
- *  - enrollment.activated  → store entitlement; enrol now if the learner has an account
- *  - enrollment.revoked    → suspend / unenrol the learner, stop progress pushes
- *  - enrollment.completed  → mark the mapping COMPLETED (no more /completion calls)
+ *  - ping                  -> acknowledged, no action
+ *  - enrollment.activated  -> store entitlement; enrol now if the learner has an account
+ *  - enrollment.revoked    -> suspend / unenrol the learner, stop progress pushes
+ *  - enrollment.completed  -> mark the mapping COMPLETED (no more /completion calls)
  *
  * Guarantees:
  *  - Signature verified before anything else (HMAC-SHA256, 5 minute tolerance).
  *  - Each delivery ID is applied once (local_swayam_webhook).
  *  - Events are applied in order per enrollment (local_swayam_entitle.sequence).
- *  - Does NOT write Moodle completion or grade data, and never deletes a user.
+ *  - Does not write Moodle completion or grade data, and never deletes a user.
+ *
+ * @package    local_swayam
+ * @copyright  2026 32Mins Digital Consultancy Service
+ * @license    https://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
+ */
+
+namespace local_swayam;
+
+/**
+ * Webhook receiver logic.
  */
 class webhook {
 
@@ -249,7 +271,6 @@ class webhook {
             // The entitlement is applied by the user_loggedin observer.
             logger::info('WEBHOOK_ENTITLEMENT_STORED', [
                 'enrollmentId'    => $ent->enrollmentid,
-                'sub'             => $ent->swayamsub,
                 'partnerCourseId' => $ent->partnercourseid,
                 'next'            => 'Learner is enrolled at first Swayam Plus sign-in',
             ]);
@@ -329,7 +350,6 @@ class webhook {
             'userid'       => $userid,
             'courseid'     => $courseid,
             'enrollmentId' => $ent->enrollmentid,
-            'course'       => $course->fullname,
             'reactivated'  => $reactivate ? 'yes' : 'no',
         ]);
         return true;
